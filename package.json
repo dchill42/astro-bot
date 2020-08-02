@@ -1,0 +1,9 @@
+{
+  "name": "Astro",
+  "version": "1.0.0",
+  "description": "Astrological Retriever",
+  "main": "astro.js",
+  "author": "DChill42",
+  "dependencies": {
+  }
+}
