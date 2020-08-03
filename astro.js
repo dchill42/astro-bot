@@ -1,4 +1,5 @@
 const Discord = require('discord.js');
+const Winston = require('winston');
 const Https = require('https');
 const Parser = require('node-html-parser');
 const Scheduler = require('node-schedule');
@@ -6,6 +7,19 @@ const Fs = require('fs');
 
 const Auth = require('./auth.json');
 
+const SCHED_DIR = './schedules';
+const LOG_FILE = './activity.log';
+
+const logger = Winston.createLogger({
+  transports: [
+    new Winston.transports.Console({ colorize: true }),
+    new Winston.transports.File({ filename: LOG_FILE })
+  ],
+  format: Winston.format.combine(
+    Winston.format.timestamp(),
+    Winston.format.simple()
+  )
+});
 const client = new Discord.Client();
 const jobs = {};
 const listeners = [];
@@ -69,10 +83,9 @@ const signs = {
   aqu: 'Aquarius',
   pis: 'Pisces'
 }
-const SCHED_DIR = './schedules';
 
 function onReady() {
-  console.log(`Connected as: ${client.user.username} (${client.user.id})`);
+  logger.info(`Connected as: ${client.user.username} (${client.user.id})`);
   readSchedules();
 }
 
@@ -103,9 +116,12 @@ function amMentioned(mentions) {
 }
 
 function onError(name, err) {
+  const msg = `Failed to fetch ${name}: ${err}`;
+
+  logger.error(msg);
   listeners.forEach(l => {
     const usr = client.users.cache.get(l);
-    usr.send(`Failed to fetch ${name}: ${err}`);
+    usr.send(msg);
   });
 }
 
@@ -188,6 +204,7 @@ function unfetch(msg) {
   delete guildJobs[jobName];
   writeSchedule(guildId);
   msg.channel.send(`Rokay, ${authAt} - ro more fetching ${what} in ${chanName}`);
+  logger.info(`${msg.author.username} unscheduled ${what} from ${channel.name}`);
 }
 
 function joblist(msg) {
@@ -243,6 +260,7 @@ function scheduleFetch(msg, channel, what, when) {
   guildJobs[jobName].sched = Scheduler.scheduleJob(`0 ${when} * * *`, () => { runJob(jobName); });
   writeSchedule(guildId);
   msg.channel.send(`Rokay, ${authAt} - fetching ${what} in ${channel.toString()} every day at ${when}:00 GMT`);
+  logger.info(`${msg.author.username} scheduled ${what} in ${channel.name} at ${when}`);
 }
 
 function fetchWhat(what, channel) {
@@ -297,13 +315,13 @@ function fetchData(url, name, onEnd) {
 
 function readSchedules() {
   Fs.readdir(SCHED_DIR, (err, files) => {
-    if (err) return console.log(err);
+    if (err) return logger.error(err);
 
     files.forEach(f => {
       if (f.startsWith('.')) return;
 
       Fs.readFile(`${SCHED_DIR}/${f}`, (err, data) => {
-        if (err) return console.log(err);
+        if (err) return logger.error(err);
 
         const guildJobs = jobsForGuild(f.slice(0, -5));
 
@@ -321,7 +339,7 @@ function writeSchedule(guildId) {
         tree = Object.entries(guildJobs).map(([k, v]) => { return [k, v.time]; }),
         data = JSON.stringify(Object.fromEntries(tree));
 
-  Fs.writeFile(`${SCHED_DIR}/${guildId}.json`, data, err => { if (err) console.log(err); });
+  Fs.writeFile(`${SCHED_DIR}/${guildId}.json`, data, err => { if (err) logger.error(err); });
 }
 
 client.once('ready', onReady);
