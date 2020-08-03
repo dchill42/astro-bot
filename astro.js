@@ -6,9 +6,39 @@ const Scheduler = require('node-schedule');
 const Auth = require('./auth.json');
 
 const client = new Discord.Client();
-let schedJob = null,
-    schedFunc = null,
-    schedChan = '';
+const jobs = {};
+const listeners = [];
+const fetchers = {
+  Skywatch: (channel) => {
+    const locale = 'en-US',
+          date = new Date(),
+          weekday = date.toLocaleString(locale, { weekday: 'long' }),
+          month = date.toLocaleString(locale, { month: 'long' }),
+          day = date.getDate(),
+          url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`;
+
+    fetchData(url, 'Skywatch', (body) => {
+      const elem = Parser.parse(body).querySelector('.entry-content'),
+            entry = elem.structuredText.replace(/\n/g, '\n\n');
+      channel.send(`**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
+    });
+  },
+
+  AstrologyAnswers: (channel) => {
+    const query = '(%23dailyreading)%20(from%3AAstrologyAnswer)',
+          args = `q=${query}&result_type=recent&count=1&include_entities=1&tweet_mode=extended`,
+          opts = {
+            hostname: 'api.twitter.com',
+            path: `/1.1/search/tweets.json?${args}`,
+            headers: { Authorization: `Bearer ${Auth.twitter}` }
+          };
+
+    fetchData(opts, 'AstrologyAnswers', (body) => {
+      const payload = JSON.parse(body);
+      channel.send(payload.statuses[0].entities.media[0].media_url);
+    });
+  }
+};
 
 function onReady() {
   console.log(`Connected as: ${client.user.username} (${client.user.id})`);
@@ -26,12 +56,25 @@ function onMessage(msg) {
     unfetch(msg);
   } else if (msg.content.includes('fetch')) {
     fetch(msg);
+  } else if (msg.content.includes('joblist')) {
+    joblist(msg);
+  } else if (msg.content.includes('notices')) {
+    notices(msg);
+  } else if (msg.content.includes('shush')) {
+    shush(msg);
   }
 }
 
 function amMentioned(mentions) {
   return (mentions.users.find(u => { return u.id === client.user.id }) ||
     mentions.roles.find(r => { return r.id === client.user.id }));
+}
+
+function onError(name, err) {
+  listeners.forEach((l) => {
+    const usr = client.users.cache.get(l);
+    usr.send(`Failed to fetch ${name}: ${err}`);
+  });
 }
 
 function help(msg) {
@@ -74,10 +117,10 @@ function fetch(msg) {
   const matches = msg.content.match(/fetch\s+(sky\w*|aa)\s*(in\s+<#(\d+)>)?\s*(at\s+(\d+))?/i);
   if (!matches) return msg.channel.send(':newspaper2:');
 
-  const what = matches[1],
+  const what = fetchWhat(matches[1]),
         where = matches[3],
         when = matches[5];
-  var channel = msg.channel;
+  let channel = msg.channel;
 
   if (where) {
     const ch = client.channels.cache.get(where);
@@ -87,74 +130,95 @@ function fetch(msg) {
 
   if (when) return scheduleFetch(msg, channel, what, when);
 
-  what.startsWith('sky') ? fetchSkywatch(channel) : fetchAstrologyAnswers(channel);
-}
-
-function scheduleFetch(msg, channel, what, when) {
-  const skywatch = what.startsWith('sky');
-
-  if (!msg.member.hasPermission('ADMINISTRATOR')) {
-    return msg.channel.send(`Rorry, ${msg.author.toString()} - not arrowed`);
-  }
-
-  if (schedJob) schedJob.cancel();
-  schedFunc = skywatch ? fetchSkywatch : fetchAstrologyAnswers;
-  schedChan = channel;
-  schedJob = Scheduler.scheduleJob(`${when} * * *`, () => { schedFunc(schedChan); });
-  return msg.channel.send(
-    `Rokay, ${msg.author.toString()} - fetching ${skywatch ? 'Skywatch' : 'Astrology Answers'} ` +
-      `in ${channel.toString()} every day at ${when}:00`
-  );
+  fetchers[what](channel);
 }
 
 function unfetch(msg) {
-  if (!schedJob) return msg.channel.send(`Nothing to unfetch, ${msg.author.toString()}`);
-  schedJob.cancel();
-  schedJob = null;
-  schedFunc = null;
-  schedChan = '';
-  msg.channel.send(`Rokay, ${msg.author.toString()} - ro more fetching`);
+  const matches = msg.content.match(/unfetch\s+(sky\w*|aa)\s*in\s+<#(\d+)>/i);
+  if (!matches) return msg.channel.send(':face_vomiting:');
+
+  const what = fetchWhat(matches[1]),
+        where = matches[2],
+        channel = client.channels.cache.get(where),
+        chanName = channel ? channel.name : `<#${where}>`;
+        jobName = `${what}@${where}`,
+        job = jobs[jobName],
+        authAt = msg.author.toString();
+
+  if (!job) return msg.channel.send(`Rorry, ${authAt} - not fetching ${what} in ${chanName}`);
+  job.cancel();
+  delete jobs[jobName];
+  msg.channel.send(`Rokay, ${authAt} - ro more fetching ${what} in ${chanName}`);
 }
 
-function fetchSkywatch(channel) {
-  const locale = 'en-US',
-        date = new Date(),
-        weekday = date.toLocaleString(locale, { weekday: 'long' }),
-        month = date.toLocaleString(locale, { month: 'long' }),
-        day = date.getDate(),
-        url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`;
+function joblist(msg) {
+  const keys = Object.keys(jobs),
+        lines = keys.map(k => { return jobString(k); });
 
+  if (!msg.member.hasPermission('ADMINISTRATOR')) {
+    return msg.channel.send(`Rorry, ${msg.author.toString()} - eyes only`);
+  }
+  msg.channel.send(`Job list:\n${lines.join('\n')}`);
+}
+
+function notices(msg) {
+  const authId = msg.author.id,
+        authAt = msg.author.toString();
+
+  if (listeners.includes(authId)) return msg.channel.send(`You ralready get notices, ${authAt}`);
+  if (!msg.member.hasPermission('ADMINISTRATOR')) return msg.channel.send(`Rorry, ${authAt} - eyes only`);
+  listeners.push(authId);
+  msg.channel.send(`Rokay, ${authAt} - I'll rend you notices`);
+}
+
+function shush(msg) {
+  const index = listeners.indexOf(msg.author.id),
+        authAt = msg.author.toString();
+
+  if (index < 0) return msg.channel.send(`I don't rend you notices, ${authAt}`);
+  listeners.splice(index, 1);
+  msg.channel.send(`Rokay, ${authAt} - ro more notices`);
+}
+
+function fetchWhat(arg) {
+  if (arg.startsWith('sky')) return 'Skywatch';
+  return 'AstrologyAnswers';
+}
+
+function scheduleFetch(msg, channel, fetcher, when) {
+  const jobName = `${fetcher}@${channel.id}`,
+        job = jobs[jobName],
+        authAt = msg.author.toString();
+
+  if (!msg.member.hasPermission('ADMINISTRATOR')) return msg.channel.send(`Rorry, ${authAt} - not arrowed`);
+
+  if (job) job.cancel();
+  jobs[jobName] = Scheduler.scheduleJob(`${when} * * *`, () => { runJob(jobName); });
+  msg.channel.send(`Rokay, ${authAt} - fetching ${fetcher} in ${channel.toString()} every day at ${when}:00`);
+}
+
+function runJob(jobName) {
+  const [fetcher, channel] = jobArgs(jobName);
+  fetchers[fetcher](channel);
+}
+
+function jobArgs(jobName) {
+  const [fetcher, id] = jobName.split('@'),
+        channel = client.channels.cache.get(id);
+  return [fetcher, channel];
+}
+
+function jobString(jobName) {
+  const [fetcher, channel] = jobArgs(jobName);
+  return `${fetcher} in ${channel.name}`;
+}
+
+function fetchData(url, name, onEnd) {
   Https.get(url, (res) => {
-    var html = '';
-
-    res.on('data', (chunk) => html += chunk);
-    res.on('end', () => {
-      const root = Parser.parse(html),
-            el = root.querySelector('.entry-content'),
-            entry = el.structuredText.replace(/\n/g, '\n\n');
-
-      channel.send(`**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
-    });
-  }).end();
-}
-
-function fetchAstrologyAnswers(channel) {
-  const query = '(%23dailyreading)%20(from%3AAstrologyAnswer)',
-        args = `q=${query}&result_type=recent&count=1&include_entities=1&tweet_mode=extended`,
-        opts = {
-          hostname: 'api.twitter.com',
-          path: `/1.1/search/tweets.json?${args}`,
-          headers: { Authorization: `Bearer ${Auth.twitter}` }
-        };
-
-  Https.get(opts, (res) => {
-    var body = '';
-
+    let body = '';
     res.on('data', (chunk) => body += chunk);
-    res.on('end', () => {
-      const payload = JSON.parse(body);
-      channel.send(payload.statuses[0].entities.media[0].media_url);
-    });
+    res.on('end', () => { onEnd(body); });
+    res.on('error', (err) => { onError(name, err) });
   }).end();
 }
 
