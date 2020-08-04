@@ -3,6 +3,7 @@ const Winston = require('winston');
 const Https = require('https');
 const Parser = require('node-html-parser');
 const Scheduler = require('node-schedule');
+const Offsets = require('timezone-abbr-offsets');
 const Fs = require('fs');
 
 const Auth = require('./auth.json');
@@ -10,6 +11,8 @@ const Auth = require('./auth.json');
 const SCHED_DIR = './schedules';
 const LIST_DIR = './listeners';
 const LOG_FILE = './activity.log';
+const MS_PER_MIN = 60 * 1000;
+const MS_PER_HOUR = 60 * MS_PER_MIN;
 
 const logger = Winston.createLogger({
   transports: [
@@ -130,16 +133,17 @@ function onError(name, guildId, err) {
 }
 
 function help(msg) {
-  msg.author.send(
-    'Retriever commands:\n' +
+  let cmds = 'Retriever commands:\n' +
       ':star: help - Send me this help message\n' +
       ':star: intro - Introduce yourself\n' +
       ':star: speak - Say something\n' +
       ':star: fetch <what> - Fetch something:\n' +
       ':star::star: <blank> A newspaper\n' +
       ':star::star: skywatch - Today\'s Skywatch astrology report\n' +
-      ':star::star: aa - Today\'s Astrology Answers card\n'
-  );
+      ':star::star: aa - Today\'s Astrology Answers card\n' +
+      Object.values(signs).map((v) => { return `:star::star: ${v.toLowerCase()} - Today\'s ${v} horoscope\n` });
+
+  msg.author.send(cmds);
   msg.channel.send(`Rent you a message, ${msg.author.toString()}`);
 }
 
@@ -166,23 +170,35 @@ function speak(channel) {
 }
 
 function fetch(msg) {
-  const format = `fetch\\s+${whatMatcher()}\\s*(in\\s+<#(\\d+)>)?\\s*(at\\s+(\\d{1,2}))?`,
+  const in_fmt = '(in\\s+<#(\\d+)>)?',
+        at_fmt = '(at\\s+(\\d{1,2}))?',
+        mn_fmt = '(:(\\d{2}))?',
+        pm_fmt = '([ap]m)?',
+        tz_fmt = '([A-Z]{1,3})?',
+        format = `fetch\\s+${whatMatcher()}\\s*${in_fmt}\\s*${at_fmt}${mn_fmt}${pm_fmt}\\s*${tz_fmt}`,
         exp = new RegExp(format, 'i'),
         matches = msg.content.match(exp);
   if (!matches) return msg.channel.send(':newspaper2:');
 
   const what = whatArg(matches[1]),
         where = matches[3],
-        when = matches[5];
+        hours = matches[5],
+        minutes = matches[7],
+        pm = matches[8],
+        tz = matches[9];
   let channel = msg.channel;
 
   if (where) {
     const ch = client.channels.cache.get(where);
-    if (!ch) return msg.channel.send(`Rorry, ${msg.author.toString()} - couldn\'t find ${where}`);
+    if (!ch) return rorry(msg, `couldn\'t find ${where}`);
     channel = ch;
   }
 
-  if (when) return scheduleFetch(msg, channel, what, when);
+  if (hours) {
+    const when = whenArg(hours, minutes, pm, tz);
+    if (!when) return;
+    return scheduleFetch(msg, channel, what, when);
+  }
 
   fetchWhat(what, channel);
 }
@@ -200,14 +216,13 @@ function unfetch(msg) {
         jobName = `${what}@${where}`,
         guildId = msg.guild.id,
         guildJobs = jobsForGuild(guildId),
-        job = guildJobs[jobName],
-        authAt = msg.author.toString();
+        job = guildJobs[jobName];
 
-  if (!job) return msg.channel.send(`Rorry, ${authAt} - not fetching ${what} in ${chanName}`);
+  if (!job) return rorry(msg, `not fetching ${what} in ${chanName}`);
   job.sched.cancel();
   delete guildJobs[jobName];
   writeSchedule(guildId);
-  msg.channel.send(`Rokay, ${authAt} - ro more fetching ${what} in ${chanName}`);
+  rokay(msg, `ro more fetching ${what} in ${chanName}`);
   logger.info(`${msg.author.username} unscheduled ${what} from ${channel.name}`);
 }
 
@@ -232,7 +247,7 @@ function notices(msg) {
   if (!isAdmin(msg)) return;
   guildLists.push(authId);
   writeListeners(guildId);
-  msg.channel.send(`Rokay, ${authAt} - I'll rend you notices`);
+  rokay(msg, `I'll rend you notices`);
 }
 
 function shush(msg) {
@@ -244,7 +259,7 @@ function shush(msg) {
   if (index < 0) return msg.channel.send(`I don't rend you notices, ${authAt}`);
   guildLists.splice(index, 1);
   writeListeners(guildId);
-  msg.channel.send(`Rokay, ${authAt} - ro more notices`);
+  rokay(msg, `ro more notices`);
 }
 
 function notifylist(msg) {
@@ -254,6 +269,16 @@ function notifylist(msg) {
         lines = guildLists.map(l => { return client.users.cache.get(l).toString(); });
 
   msg.channel.send(`Notify list:\n${lines.join('\n')}`);
+}
+
+function rokay(msg, info) {
+  msg.channel.send(`Rokay, ${msg.author.toString()} - ${info}`);
+  return true;
+}
+
+function rorry(msg, info) {
+  msg.channel.send(`Rorry, ${msg.author.toString()} - ${info}`);
+  return false;
 }
 
 function whatMatcher() {
@@ -266,21 +291,35 @@ function whatArg(arg) {
   return signs[arg.slice(0, 3)];
 }
 
+function whenArg(hours, minutes, pm, tz) {
+  let time = parseInt(hours);
+
+  if (pm && pm.toLowerCase() === 'pm') time += 12;
+  time *= MS_PER_HOUR;
+  if (minutes) time += parseInt(minutes) * MS_PER_MIN;
+  if (tz) {
+    const offset = Offsets[tz];
+    if (!offset) return rorry(msg, `ron't know ${tz} timezone`);
+    time -= offset * MS_PER_MIN;
+  }
+  return new Date(time);
+}
+
 function scheduleFetch(msg, channel, what, when) {
+  if (!isAdmin(msg)) return;
+
   const jobName = `${what}@${channel.id}`,
         guildId = msg.guild.id,
         guildJobs = jobsForGuild(guildId),
         job = guildJobs[jobName],
-        authAt = msg.author.toString();
-
-  if (!isAdmin(msg)) return;
+        time = timeString(when, true);
 
   if (job) job.sched.cancel();
-  guildJobs[jobName] = { time: when }
-  guildJobs[jobName].sched = Scheduler.scheduleJob(`0 ${when} * * *`, () => { runJob(jobName); });
+  guildJobs[jobName] = { time: when.valueOf() }
+  guildJobs[jobName].sched = Scheduler.scheduleJob(`${timeString(when)} * * *`, () => { runJob(jobName); });
   writeSchedule(guildId);
-  msg.channel.send(`Rokay, ${authAt} - fetching ${what} in ${channel.toString()} every day at ${when}:00 GMT`);
-  logger.info(`${msg.author.username} scheduled ${what} in ${channel.name} at ${when}`);
+  rokay(msg, `fetching ${what} in ${channel.toString()} every day at ${time} GMT`);
+  logger.info(`${msg.author.username} scheduled ${what} in ${channel.name} at ${time}`);
 }
 
 function fetchWhat(what, channel) {
@@ -316,8 +355,8 @@ function jobArgs(jobName) {
 
 function jobString(guildId, jobName) {
   const [fetcher, channel] = jobArgs(jobName),
-        when = jobsForGuild(guildId)[jobName].time;
-  return `${fetcher} in ${channel.toString()} at ${when}:00 GMT`;
+        when = new Date(jobsForGuild(guildId)[jobName].time);
+  return `${fetcher} in ${channel.toString()} at ${timeString(when, true)} GMT`;
 }
 
 function listenerString(userId) {
@@ -325,12 +364,16 @@ function listenerString(userId) {
   return `${user.toString}`;
 }
 
+function timeString(when, colon = false) {
+  const hours = when.getUTCHours(),
+        minutes = when.getUTCMinutes();
+  if (colon) return `${hours}:${minutes < 10 ? '0' : ''}${minutes}`;
+  return `${minutes} ${hours}`;
+}
+
 function isAdmin(msg) {
-  if (!msg.member.hasPermission('ADMINISTRATOR')) {
-    msg.channel.send(`Rorry, ${msg.author.toString()} - not arrowed`);
-    return false;
-  }
-  return true;
+  if (msg.member.hasPermission('ADMINISTRATOR')) return true;
+  return rorry(msg, `not arrowed`);
 }
 
 function fetchData(url, name, guildId, onEnd) {
@@ -354,9 +397,12 @@ function readSchedules() {
 
         const guildJobs = jobsForGuild(f.slice(0, -5));
 
-        Object.entries(JSON.parse(data)).map(([jobName, when]) => {
-          guildJobs[jobName] = { time: when }
-          guildJobs[jobName].sched = Scheduler.scheduleJob(`0 ${when} * * *`, () => { runJob(jobName); });
+        Object.entries(JSON.parse(data)).map(([jobName, time]) => {
+          const ms = parseInt(time),
+                when = new Date(ms);
+
+          guildJobs[jobName] = { time: ms }
+          guildJobs[jobName].sched = Scheduler.scheduleJob(`${timeString(when)} * * *`, () => { runJob(jobName); });
         });
       });
     });
