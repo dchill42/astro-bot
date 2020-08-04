@@ -8,6 +8,7 @@ const Fs = require('fs');
 const Auth = require('./auth.json');
 
 const SCHED_DIR = './schedules';
+const LIST_DIR = './listeners';
 const LOG_FILE = './activity.log';
 
 const logger = Winston.createLogger({
@@ -22,7 +23,7 @@ const logger = Winston.createLogger({
 });
 const client = new Discord.Client();
 const jobs = {};
-const listeners = [];
+const listeners = {};
 const fetchers = {
   Skywatch: (channel) => {
     const locale = 'en-US',
@@ -32,7 +33,7 @@ const fetchers = {
           day = date.getDate(),
           url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`;
 
-    fetchData(url, 'Skywatch', (body) => {
+    fetchData(url, 'Skywatch', channel.guild.id, (body) => {
       const elem = Parser.parse(body).querySelector('.entry-content'),
             entry = elem.structuredText.replace(/\n/g, '\n\n');
       channel.send(`**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
@@ -48,7 +49,7 @@ const fetchers = {
             headers: { Authorization: `Bearer ${Auth.twitter}` }
           };
 
-    fetchData(opts, 'AstrologyAnswers', (body) => {
+    fetchData(opts, 'AstrologyAnswers', channel.guild.id, (body) => {
       const payload = JSON.parse(body);
       channel.send(payload.statuses[0].entities.media[0].media_url);
     });
@@ -58,7 +59,7 @@ const fetchers = {
     const host = 'https://astrologyanswers.com/horoscopes',
           url = `${host}/${sign.toLowerCase()}-daily-horoscope/`;
 
-    fetchData(url, 'Sign Horoscope', (body) => {
+    fetchData(url, 'Sign Horoscope', channel.guild.id, (body) => {
       const elem = Parser.parse(body).querySelector('.horoscope_summary'),
             ul = elem.querySelector('ul');
 
@@ -86,6 +87,7 @@ const signs = {
 
 function onReady() {
   logger.info(`Connected as: ${client.user.username} (${client.user.id})`);
+  readListeners();
   readSchedules();
 }
 
@@ -107,6 +109,8 @@ function onMessage(msg) {
     notices(msg);
   } else if (msg.content.includes('shush')) {
     shush(msg);
+  } else if (msg.content.includes('notifylist')) {
+    notifylist(msg);
   }
 }
 
@@ -115,11 +119,11 @@ function amMentioned(mentions) {
     mentions.roles.find(r => { return r.id === client.user.id }));
 }
 
-function onError(name, err) {
+function onError(name, guildId, err) {
   const msg = `Failed to fetch ${name}: ${err}`;
 
   logger.error(msg);
-  listeners.forEach(l => {
+  listenersforGuild(guildId).forEach(l => {
     const usr = client.users.cache.get(l);
     usr.send(msg);
   });
@@ -208,32 +212,48 @@ function unfetch(msg) {
 }
 
 function joblist(msg) {
+  if (!isAdmin(msg)) return;
+
   const guildId = msg.guild.id,
         guildJobs = jobsForGuild(guildId),
         keys = Object.keys(guildJobs),
         lines = keys.map(k => { return jobString(guildId, k); });
 
-  if (!isAdmin(msg)) return;
   msg.channel.send(`Job list:\n${lines.join('\n')}`);
 }
 
 function notices(msg) {
-  const authId = msg.author.id,
+  const guildId = msg.guild.id,
+        guildLists = listenersForGuild(guildId),
+        authId = msg.author.id,
         authAt = msg.author.toString();
 
-  if (listeners.includes(authId)) return msg.channel.send(`You ralready get notices, ${authAt}`);
+  if (guildLists.includes(authId)) return msg.channel.send(`You ralready get notices, ${authAt}`);
   if (!isAdmin(msg)) return;
-  listeners.push(authId);
+  guildLists.push(authId);
+  writeListeners(guildId);
   msg.channel.send(`Rokay, ${authAt} - I'll rend you notices`);
 }
 
 function shush(msg) {
-  const index = listeners.indexOf(msg.author.id),
+  const guildId = msg.guild.id,
+        guildLists = listenersForGuild(guildId),
+        index = guildLists.indexOf(msg.author.id),
         authAt = msg.author.toString();
 
   if (index < 0) return msg.channel.send(`I don't rend you notices, ${authAt}`);
-  listeners.splice(index, 1);
+  guildLists.splice(index, 1);
+  writeListeners(guildId);
   msg.channel.send(`Rokay, ${authAt} - ro more notices`);
+}
+
+function notifylist(msg) {
+  if (!isAdmin(msg)) return;
+
+  const guildLists = listenersForGuild(msg.guild.id),
+        lines = guildLists.map(l => { return client.users.cache.get(l).toString(); });
+
+  msg.channel.send(`Notify list:\n${lines.join('\n')}`);
 }
 
 function whatMatcher() {
@@ -275,6 +295,10 @@ function fetchWhat(what, channel) {
   }
 }
 
+function listenersForGuild(guildId) {
+  return listeners[guildId] || (listeners[guildId] = []);
+}
+
 function jobsForGuild(guildId) {
   return jobs[guildId] || (jobs[guildId] = {});
 }
@@ -293,7 +317,12 @@ function jobArgs(jobName) {
 function jobString(guildId, jobName) {
   const [fetcher, channel] = jobArgs(jobName),
         when = jobsForGuild(guildId)[jobName].time;
-  return `${fetcher} in ${channel.name} at ${when}:00 GMT`;
+  return `${fetcher} in ${channel.toString()} at ${when}:00 GMT`;
+}
+
+function listenerString(userId) {
+  const usr = client.users.cache.get(userId);
+  return `${user.toString}`;
 }
 
 function isAdmin(msg) {
@@ -304,12 +333,12 @@ function isAdmin(msg) {
   return true;
 }
 
-function fetchData(url, name, onEnd) {
+function fetchData(url, name, guildId, onEnd) {
   Https.get(url, (res) => {
     let body = '';
     res.on('data', (chunk) => body += chunk);
     res.on('end', () => { onEnd(body); });
-    res.on('error', (err) => { onError(name, err) });
+    res.on('error', (err) => { onError(name, guildId, err) });
   }).end();
 }
 
@@ -340,6 +369,30 @@ function writeSchedule(guildId) {
         data = JSON.stringify(Object.fromEntries(tree));
 
   Fs.writeFile(`${SCHED_DIR}/${guildId}.json`, data, err => { if (err) logger.error(err); });
+}
+
+function readListeners() {
+  Fs.readdir(LIST_DIR, (err, files) => {
+    if (err) return logger.error(err);
+
+    files.forEach(f => {
+      if (f.startsWith('.')) return;
+
+      Fs.readFile(`${LIST_DIR}/${f}`, (err, data) => {
+        if (err) return logger.error(err);
+
+        const guildId = f.slice(0, -5);
+        listeners[guildId] = JSON.parse(data);
+      });
+    });
+  });
+}
+
+function writeListeners(guildId) {
+  const guildLists = listenersForGuild(guildId),
+        data = JSON.stringify(guildLists);
+
+  Fs.writeFile(`${LIST_DIR}/${guildId}.json`, data, err => { if (err) logger.error(err); });
 }
 
 client.once('ready', onReady);
