@@ -2,7 +2,7 @@ const Discord = require('discord.js');
 const Winston = require('winston');
 const Https = require('https');
 const Parser = require('node-html-parser');
-const Scheduler = require('node-schedule');
+const Cron = require('node-schedule');
 const Offsets = require('timezone-abbr-offsets');
 const Fs = require('fs');
 
@@ -13,21 +13,7 @@ const LIST_DIR = './listeners';
 const LOG_FILE = './activity.log';
 const MS_PER_MIN = 60 * 1000;
 const MS_PER_HOUR = 60 * MS_PER_MIN;
-
-const logger = Winston.createLogger({
-  transports: [
-    new Winston.transports.Console({ colorize: true }),
-    new Winston.transports.File({ filename: LOG_FILE })
-  ],
-  format: Winston.format.combine(
-    Winston.format.timestamp(),
-    Winston.format.simple()
-  )
-});
-const client = new Discord.Client();
-const jobs = {};
-const listeners = {};
-const signs = {
+const SIGNS = {
   ari: 'Aries',
   tau: 'Taurus',
   gem: 'Gemini',
@@ -41,120 +27,37 @@ const signs = {
   aqu: 'Aquarius',
   pis: 'Pisces'
 }
-const fetchers = {
-  Skywatch: (target) => {
-    const locale = 'en-US',
-          date = new Date(),
-          weekday = date.toLocaleString(locale, { weekday: 'long' }),
-          month = date.toLocaleString(locale, { month: 'long' }),
-          day = date.getDate(),
-          url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`;
 
-    logger.info(`Fetching ${target.what}`);
-    fetchData(url, 'Skywatch', target.guildId, (body) => {
-      const elem = Parser.parse(body).querySelector('.entry-content'),
-            entry = elem.structuredText.replace(/\n/g, '\n\n');
-
-      logger.info(`Sending ${target.forLog()}`);
-      target.recipient.send(`**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
-    });
-  },
-
-  AstrologyAnswers: (target) => {
-    const query = '(%23dailyreading)%20(from%3AAstrologyAnswer)',
-          args = `q=${query}&result_type=recent&count=1&include_entities=1&tweet_mode=extended`,
-          opts = {
-            hostname: 'api.twitter.com',
-            path: `/1.1/search/tweets.json?${args}`,
-            headers: { Authorization: `Bearer ${Auth.twitter}` }
-          };
-
-    logger.info(`Fetching ${target.what}`);
-    fetchData(opts, 'AstrologyAnswers', target.guildId, (body) => {
-      const payload = JSON.parse(body);
-
-      logger.info(`Sending ${target.forLog()}`);
-      target.recipient.send(payload.statuses[0].entities.media[0].media_url);
-    });
-  },
-
-  Sign: (target) => {
-    const host = 'https://astrologyanswers.com/horoscopes',
-          url = `${host}/${target.what.toLowerCase()}-daily-horoscope/`;
-
-    logger.info(`Fetching ${target.what}`);
-    fetchData(url, 'Sign Horoscope', target.guildId, (body) => {
-      const elem = Parser.parse(body).querySelector('.horoscope_summary'),
-            ul = elem.querySelector('ul');
-
-      if (ul) ul.set_content('');
-
-      const entry = elem.structuredText.replace(/\n/g, '\n\n');
-
-      logger.info(`Sending ${target.forLog()}`);
-      target.recipient.send(`${entry}\n\n${host}`);
-    });
-  }
-};
-Object.values(signs).forEach(n => { fetchers[n] = fetchers.Sign; });
-
-class MessageTarget {
-  constructor({ guildId = 0, what = null, where = null, author = null, who = null, jobName = null }) {
-    if (jobName !== null) {
-      this.fromString(jobName);
-      return;
-    }
-
-    if (where) this.channel = client.channels.cache.get(where);
-    if (author) {
-      this.user = author;
-    } else if (who) {
-      this.user = client.users.cache.get(who);
-    }
-
-    if (!(this.channelObj || this.userObj)) {
-      this.error = `couldn\'t find that ${this.isUser ? 'user' : 'channel'}`;
-      return;
-    }
-
-    this.guildId = guildId;
-    this.what = what;
+class MessageContext {
+  constructor(msg) {
+    this.content = msg.content;
+    this.mentions = msg.mentions;
+    this.channel = new Communicator(msg.channel, false);
+    this.author = new Communicator(msg.author, true);
+    this.fromAdmin = msg.member && msg.member.hasPermission('ADMINISTRATOR');
+    this.isDm = msg.channel.type == 'dm';
+    this.guildId = msg.guild ? msg.guild.id : this.commonGuild(msg.channel);
   }
 
-  get user() {
-    return this.userObj;
+  commonGuild(channel) {
+    const gids_a = channel.client.guilds.cache.map(g => g.id),
+          gids_b = channel.recipient.client.guilds.cache.map(g => g.id);
+
+    return gids_a.filter(g => gids_b.includes(g)).first();
   }
 
-  set user(user) {
-    if (user !== null) this.channelObj = null;
-    this.userObj = user;
-    this.isUser = true;
+  mentioned(id) {
+    return (this.mentions.users.find(u => { return u.id === id }) ||
+      this.mentions.roles.find(r => { return r.id === id }));
   }
+}
 
-  get channel() {
-    return this.channelObj;
-  }
-
-  set channel(channel) {
-    if (channel !== null) this.userObj = null;
-    this.channelObj = channel;
-    this.isUser = false;
-  }
-
-  get id() {
-    return this.isUser ? this.userObj.id : this.channelObj.id;
-  }
-
-  get name() {
-    return this.isUser ? this.userObj.username : this.channelObj.name;
-  }
-
-  get mention() {
-    return this.isUser ? this.userObj.toString() : this.channelObj.toString();
-  }
-
-  get recipient() {
-    return this.isUser ? this.userObj : this.channelObj;
+class Communicator {
+  constructor(entity, isUser) {
+    this.isUser = isUser;
+    this.id = entity.id;
+    this.name = isUser ? entity.username : entity.name;
+    this.mention = entity.toString();
   }
 
   get code() {
@@ -165,28 +68,57 @@ class MessageTarget {
     return this.isUser ? 'for' : 'in';
   }
 
+  static byId(id, isUser) {
+    if (id === null) return null;
+    const entity = isUser ? client.users.cache.get(id) : client.channels.cache.get(id);
+    return new Communicator({ entity, isUser });
+  }
+}
+
+class MessageTarget {
+  constructor({ guildId, what, recipient }) {
+    if (!recipient) {
+      this.error = 'couldn\'t find that recipient';
+      return;
+    }
+
+    this.guildId = guildId;
+    this.what = this.normalizeWhat(what);
+    this.recipient = recipient;
+  }
+
+  normalizeWhat(what) {
+    if (what.startsWith('sky')) return 'Skywatch';
+    else if (what == 'aa') return 'AstrologyAnswers';
+    return SIGNS[what.slice(0, 3)];
+  }
+
+  get id() {
+    return this.recipient.id;
+  }
+
+  get isUser() {
+    return this.recipient.isUser;
+  }
+
   inWords() {
-    return `${this.what} ${this.preposition} ${this.mention}`;
+    return `${this.what} ${this.recipient.preposition} ${this.recipient.mention}`;
   }
 
   forLog() {
-    return `${this.what} to #${this.name}`;
+    return `${this.what} to #${this.recipient.name}`;
   }
 
   toString() {
-    return `${this.what}@${this.guildId}#${this.code}${this.id}`;
+    return `${this.what}@${this.guildId}#${this.recipient.code}${this.recipient.id}`;
   }
 
-  fromString(jobName) {
-    const [_, what, guildId, code, id] = jobName.match(/^(\w+)@(\d+)#([uc])(\d+)/);
-    this.what = what;
-    this.guildId = guildId;
-    this.isUser = code == 'u';
-    if (this.isUser) {
-      this.user = client.users.cache.get(id);
-    } else {
-      this.channel = client.channels.cache.get(id);
-    }
+  static fromString(jobName) {
+    const [_, what, guildId, code, id] = jobName.match(/^(\w+)@(\d+)#([uc])(\d+)/),
+          isUser = code == 'u',
+          recipient = Communicator.byId(id, isUser);
+
+    return new MessageContext({ guildId, what, recipient });
   }
 }
 
@@ -242,329 +174,434 @@ class FetchTime {
   }
 }
 
-function onReady() {
-  logger.info(`Connected as: ${client.user.username} (${client.user.id})`);
-  readListeners();
-  readSchedules();
-}
+class Fetcher {
+  constructor(logger, cache, listeners) {
+    this.logger = logger;
+    this.cache = cache;
+    this.listeners = listeners;
+    Object.values(SIGNS).forEach(n => { this[n] = this.Sign; });
+  }
 
-function onMessage(msg) {
-  if (!amMentioned(msg.mentions)) return;
-  if (msg.content.includes('help')) {
-    help(msg);
-  } else if (msg.content.includes('intro')) {
-    intro(msg.channel);
-  } else if (msg.content.includes('speak')) {
-    speak(msg.channel);
-  } else if (msg.content.includes('unfetch')) {
-    unfetch(msg);
-  } else if (msg.content.includes('fetch')) {
-    fetch(msg);
-  } else if (msg.content.includes('joblist')) {
-    joblist(msg);
-  } else if (msg.content.includes('notices')) {
-    notices(msg);
-  } else if (msg.content.includes('shush')) {
-    shush(msg);
-  } else if (msg.content.includes('notifylist')) {
-    notifylist(msg);
+  dispatch(target) {
+    this[target.what](target);
+  }
+
+  Skywatch(target) {
+    const locale = 'en-US',
+          date = new Date(),
+          weekday = date.toLocaleString(locale, { weekday: 'long' }),
+          month = date.toLocaleString(locale, { month: 'long' }),
+          day = date.getDate(),
+          url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`;
+
+    this.logger.info(`Fetching ${target.what}`);
+    this.fetchData(url, target, (body) => {
+      const elem = Parser.parse(body).querySelector('.entry-content'),
+            entry = elem.structuredText.replace(/\n/g, '\n\n');
+
+      this.logger.info(`Sending ${target.forLog()}`);
+      this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
+    });
+  }
+
+  AstrologyAnswers(target) {
+    const query = '(%23dailyreading)%20(from%3AAstrologyAnswer)',
+          args = `q=${query}&result_type=recent&count=1&include_entities=1&tweet_mode=extended`,
+          opts = {
+            hostname: 'api.twitter.com',
+            path: `/1.1/search/tweets.json?${args}`,
+            headers: { Authorization: `Bearer ${Auth.twitter}` }
+          };
+
+    this.logger.info(`Fetching ${target.what}`);
+    this.fetchData(opts, target, (body) => {
+      const payload = JSON.parse(body);
+
+      this.logger.info(`Sending ${target.forLog()}`);
+      this.send(target, payload.statuses[0].entities.media[0].media_url);
+    });
+  }
+
+  Sign(target) {
+    const host = 'https://astrologyanswers.com/horoscopes',
+          url = `${host}/${target.what.toLowerCase()}-daily-horoscope/`;
+
+    this.logger.info(`Fetching ${target.what}`);
+    this.fetchData(url, target, (body) => {
+      const elem = Parser.parse(body).querySelector('.horoscope_summary'),
+            ul = elem.querySelector('ul');
+
+      if (ul) ul.set_content('');
+
+      const entry = elem.structuredText.replace(/\n/g, '\n\n');
+
+      this.logger.info(`Sending ${target.forLog()}`);
+      this.send(target, `${entry}\n\n${host}`);
+    });
+  }
+
+  fetchData(url, target, onEnd) {
+    Https.get(url, (res) => {
+      let body = '';
+      res.on('data', (chunk) => body += chunk);
+      res.on('end', () => { onEnd(body); });
+      res.on('error', (err) => { this.onError(target, err) });
+    }).end();
+  }
+
+  send(target, data) {
+    if (target.isUser) {
+      this.cache.users.get(target.id).send(data);
+    } else {
+      this.cache.channels.get(target.id).send(data);
+    }
+  }
+
+  onError(target, err) {
+    const msg = `Failed to fetch ${target.what}: ${err}`;
+
+    this.logger.error(msg);
+    this.listeners.send(target.guildId, msg);
   }
 }
 
-function amMentioned(mentions) {
-  return (mentions.users.find(u => { return u.id === client.user.id }) ||
-    mentions.roles.find(r => { return r.id === client.user.id }));
-}
-
-function onError(name, guildId, err) {
-  const msg = `Failed to fetch ${name}: ${err}`;
-
-  logger.error(msg);
-  listenersforGuild(guildId).forEach(l => {
-    const usr = client.users.cache.get(l);
-    usr.send(msg);
-  });
-}
-
-function help(msg) {
-  let cmds = 'Retriever commands:\n' +
-      ':star2: help - Send me this help message\n' +
-      ':star2: intro - Introduce yourself\n' +
-      ':star2: speak - Say something\n' +
-      ':star2: fetch <what> - Fetch something:\n' +
-      '    :star: <blank> A newspaper\n' +
-      '    :star: skywatch - Today\'s Skywatch astrology report\n' +
-      '    :star: aa - Today\'s Astrology Answers card\n' +
-      Object.values(signs).map((v) => { return `    :star: ${v.toLowerCase()} - Today\'s ${v} horoscope\n` }).join('');
-
-  msg.author.send(cmds);
-  msg.channel.send(`Rent you a message, ${msg.author.toString()}`);
-}
-
-function intro(channel) {
-  channel.send("Ri! I'm Rastro, a rastrorogical retriever. Rif you rask me for `help`, I'll rend you a message.");
-}
-
-function speak(channel) {
-  const messages = [
-      'Ruff!',
-      'Ri am the rerry rodel of a rodern ragor-reneral!',
-      'Rich ray, Reorge?',
-      'Rerro!',
-      'Ruh-roh, Raggy!',
-      'Rrrrrrrrr!',
-      'Rastrorogy rocks!',
-      'Rercury retrograde?',
-      'Run time, at rand camp, I rucked Ruto',
-      'I rav a ream...'
-    ],
-    index = Math.floor(Math.random() * messages.length);
-
-  channel.send(messages[index]);
-}
-
-function fetch(msg) {
-  const format = `fetch\\s+${whatMatcher()}\\s*(${whereMatcher()}|${whoMatcher()})?\\s*(${atMatcher()})?`,
-        exp = new RegExp(format, 'i'),
-        matches = msg.content.match(exp);
-  if (!matches) return msg.channel.send(':newspaper2:');
-
-  const what = whatArg(matches[1]),
-        where = matches[3] || msg.channel.id,
-        author = matches[4] === 'me' ? msg.author : null,
-        who = matches[5],
-        hours = matches[7],
-        minutes = matches[9],
-        pm = matches[10],
-        tz = matches[11],
-        target = new MessageTarget({ guildId: msg.guild.id, what, where, author, who });
-
-  if (target.error) return rorry(msg, target.error);
-
-  if (hours) {
-    const when = new FetchTime({ hours, minutes, pm, tz });
-    if (when.error) return rorry(msg, when.error);
-    return scheduleFetch(msg, target, when);
+class Scheduler {
+  constructor(logger, fetcher) {
+    this.logger = logger;
+    this.fetcher = fetcher;
+    this.jobs = {};
+    this.readJobs();
   }
 
-  fetchers[target.what](target);
-  if (target.isUser) {
-    const same = msg.author.id === target.id;
-    rokay(msg, `rent ${target.what} to ${same ? 'you' : target.mention}`);
+  scheduleJob(target, when) {
+    const jobName = target.toString(),
+          guildJobs = this.jobsForGuild(target.guildId),
+          job = guildJobs[jobName];
+
+    if (job) job.schedule.cancel();
+    guildJobs[jobName] = { time: when.ms }
+    guildJobs[jobName].schedule = Cron.scheduleJob(when.cron, () => { this.runJob(jobName); });
+    this.writeJobs(target.guildId);
   }
-}
 
-function unfetch(msg) {
-  const format = `unfetch\\s+${whatMatcher()}\\s*(${whereMatcher()}|${whoMatcher()})?`,
-        exp = new RegExp(format, 'i'),
-        matches = msg.content.match(exp);
-  if (!matches) return msg.channel.send(':face_vomiting:');
+  cancelJob(target) {
+    const jobName = target.toString(),
+          guildJobs = this.jobsForGuild(target.guildId),
+          job = guildJobs[jobName];
 
-  const what = whatArg(matches[1]),
-        where = matches[3] || msg.channel.id,
-        author = matches[4] === 'me' ? msg.author : null,
-        who = matches[5],
-        target = new MessageTarget({ guildId: msg.guild.id, what, where, author, who });
-  if (!(target.id === msg.author.id || isAdmin(msg))) return;
+    if (!job) return false;
+    job.sched.cancel();
+    delete guildJobs[jobName];
+    this.writeJobs(target.guildId);
+    return true;
+  }
 
-  const jobName = target.toString(),
-        guildJobs = jobsForGuild(target.guildId),
-        job = guildJobs[jobName];
+  runJob(jobName) {
+    const target = MessageTarget.fromString(jobName);
 
-  if (!job) return rorry(msg, `not fetching ${target.inWords()}`);
-  job.sched.cancel();
-  delete guildJobs[jobName];
-  writeSchedule(target.guildId);
-  rokay(msg, `ro more fetching ${target.inWords()}`);
-  logger.info(`${msg.author.username} unscheduled ${target.forLog()}`);
-}
+    this.logger.info(`Running ${target.forLog()}`);
+    this.fetcher.dispatch(target);
+  }
 
-function joblist(msg) {
-  if (!isAdmin(msg)) return;
+  listJobs(guildId) {
+    const guildJobs = this.jobsForGuild(guildId);
+    return Object.keys(guildJobs).map(k => { return this.jobString(k); }).join('\n');
+  }
 
-  const guildJobs = jobsForGuild(msg.channel.guild.id),
-        lines = Object.keys(guildJobs).map(k => { return jobString(k); });
+  jobString(jobName) {
+    const target = MessageTarget.fromSring(jobName),
+          ms = this.jobsForGuild(target.guildId)[jobName].time,
+          when = new FetchTime({ ms });
+    return `${target.inWords()} at ${when.gmt} GMT`;
+  }
 
-  msg.channel.send(`Job list:\n${lines.join('\n')}`);
-}
+  readJobs() {
+    Fs.readdir(SCHED_DIR, (err, files) => {
+      if (err) return this.logger.error(err);
 
-function notices(msg) {
-  const guildId = msg.guild.id,
-        guildLists = listenersForGuild(guildId),
-        authId = msg.author.id,
-        authAt = msg.author.toString();
+      files.forEach(f => {
+        if (f.startsWith('.')) return;
 
-  if (guildLists.includes(authId)) return msg.channel.send(`You ralready get notices, ${authAt}`);
-  if (!isAdmin(msg)) return;
-  guildLists.push(authId);
-  writeListeners(guildId);
-  rokay(msg, `I'll rend you notices`);
-}
+        Fs.readFile(`${SCHED_DIR}/${f}`, (err, data) => {
+          if (err) return this.logger.error(err);
 
-function shush(msg) {
-  const guildId = msg.guild.id,
-        guildLists = listenersForGuild(guildId),
-        index = guildLists.indexOf(msg.author.id),
-        authAt = msg.author.toString();
+          const guildJobs = this.jobsForGuild(f.slice(0, -5));
 
-  if (index < 0) return msg.channel.send(`I don't rend you notices, ${authAt}`);
-  guildLists.splice(index, 1);
-  writeListeners(guildId);
-  rokay(msg, `ro more notices`);
-}
+          Object.entries(JSON.parse(data)).map(([jobName, ms]) => {
+            const when = new FetchTime({ ms });
 
-function notifylist(msg) {
-  if (!isAdmin(msg)) return;
-
-  const guildLists = listenersForGuild(msg.guild.id),
-        lines = guildLists.map(l => { return client.users.cache.get(l).toString(); });
-
-  msg.channel.send(`Notify list:\n${lines.join('\n')}`);
-}
-
-function rokay(msg, info) {
-  msg.channel.send(`Rokay, ${msg.author.toString()} - ${info}`);
-  return true;
-}
-
-function rorry(msg, info) {
-  msg.channel.send(`Rorry, ${msg.author.toString()} - ${info}`);
-  return false;
-}
-
-function whatMatcher() {
-  return `(sky\\w*|aa|${Object.keys(signs).join('\\w*|')}\\w*)`;
-}
-
-function whereMatcher() {
-  return 'in\\s+<#(\\d+)>';
-}
-
-function whoMatcher() {
-  return 'for\\s+(me|<@!?(\\d+)>)';
-}
-
-function atMatcher() {
-  return 'at\\s+(\\d{1,2})(:(\\d{2}))?([ap]m)?\\s*([A-Z]{1,3})?';
-}
-
-function whatArg(arg) {
-  if (arg.startsWith('sky')) return 'Skywatch';
-  else if (arg == 'aa') return 'AstrologyAnswers';
-  return signs[arg.slice(0, 3)];
-}
-
-function scheduleFetch(msg, target, when) {
-  if (!(target.id === msg.author.id || isAdmin(msg))) return;
-
-  const jobName = target.toString(),
-        guildJobs = jobsForGuild(target.guildId),
-        job = guildJobs[jobName];
-
-  if (job) job.sched.cancel();
-  guildJobs[jobName] = { time: when.ms }
-  guildJobs[jobName].sched = Scheduler.scheduleJob(when.cron, () => { runJob(jobName); });
-  writeSchedule(target.guildId);
-  rokay(msg, `fetching ${target.inWords()} every day at ${when.gmt} GMT`);
-  logger.info(`${msg.author.username} scheduled ${target.forLog()} at ${when.gmt}`);
-}
-
-function listenersForGuild(guildId) {
-  return listeners[guildId] || (listeners[guildId] = []);
-}
-
-function jobsForGuild(guildId) {
-  return jobs[guildId] || (jobs[guildId] = {});
-}
-
-function runJob(jobName) {
-  const target = new MessageTarget({ jobName });
-
-  logger.info(`Running ${target.forLog()}`);
-  fetchers[target.what](target);
-}
-
-function jobString(jobName) {
-  const target = new MessageTarget({ jobName }),
-        ms = jobsForGuild(target.guildId)[jobName].time,
-        when = new FetchTime({ ms });
-  return `${target.inWords()} at ${when.gmt} GMT`;
-}
-
-function listenerString(userId) {
-  const usr = client.users.cache.get(userId);
-  return `${user.toString}`;
-}
-
-function isAdmin(msg) {
-  if (msg.member.hasPermission('ADMINISTRATOR')) return true;
-  return rorry(msg, `not arrowed`);
-}
-
-function fetchData(url, name, guildId, onEnd) {
-  Https.get(url, (res) => {
-    let body = '';
-    res.on('data', (chunk) => body += chunk);
-    res.on('end', () => { onEnd(body); });
-    res.on('error', (err) => { onError(name, guildId, err) });
-  }).end();
-}
-
-function readSchedules() {
-  Fs.readdir(SCHED_DIR, (err, files) => {
-    if (err) return logger.error(err);
-
-    files.forEach(f => {
-      if (f.startsWith('.')) return;
-
-      Fs.readFile(`${SCHED_DIR}/${f}`, (err, data) => {
-        if (err) return logger.error(err);
-
-        const guildJobs = jobsForGuild(f.slice(0, -5));
-
-        Object.entries(JSON.parse(data)).map(([jobName, ms]) => {
-          const when = new FetchTime({ ms });
-
-          guildJobs[jobName] = { time: ms }
-          guildJobs[jobName].sched = Scheduler.scheduleJob(when.cron, () => { runJob(jobName); });
+            guildJobs[jobName] = { time: ms }
+            guildJobs[jobName].schedule = Cron.scheduleJob(when.cron, () => { runJob(jobName); });
+          });
         });
       });
     });
-  });
+  }
+
+  writeJobs(guildId) {
+    const guildJobs = this.jobsForGuild(guildId),
+          tree = Object.entries(guildJobs).map(([k, v]) => { return [k, v.time]; }),
+          data = JSON.stringify(Object.fromEntries(tree));
+
+    Fs.writeFile(`${SCHED_DIR}/${guildId}.json`, data, err => { if (err) this.logger.error(err); });
+  }
+
+  jobsForGuild(guildId) {
+    return this.jobs[guildId] || (this.jobs[guildId] = {});
+  }
 }
 
-function writeSchedule(guildId) {
-  const guildJobs = jobsForGuild(guildId),
-        tree = Object.entries(guildJobs).map(([k, v]) => { return [k, v.time]; }),
-        data = JSON.stringify(Object.fromEntries(tree));
+class Listeners {
+  constructor(logger, cache) {
+    this.logger = logger;
+    this.cache = cache;
+    this.listeners = {};
+  }
 
-  Fs.writeFile(`${SCHED_DIR}/${guildId}.json`, data, err => { if (err) logger.error(err); });
-}
+  add(guildId, id) {
+    const guildLists = this.forGuild(guildId);
 
-function readListeners() {
-  Fs.readdir(LIST_DIR, (err, files) => {
-    if (err) return logger.error(err);
+    if (guildLists.includes(id)) return false;
+    guildLists.push(id);
+    this.save(guildId);
+    return true;
+  }
 
-    files.forEach(f => {
-      if (f.startsWith('.')) return;
+  remove(guildId, id) {
+    const guildLists = this.forGuild(guildId),
+          index = guildLists.indexOf(id);
 
-      Fs.readFile(`${LIST_DIR}/${f}`, (err, data) => {
-        if (err) return logger.error(err);
+    if (index < 0) return false;
+    guildLists.slice(index, 1);
+    this.save(guildId);
+    return true;
+  }
 
-        const guildId = f.slice(0, -5);
-        listeners[guildId] = JSON.parse(data);
+  list(guildId) {
+    const guildLists = this.forGuild(guildId);
+    return guildLists.map(l => { return this.cache.users.get(l).toString(); }).join('\n');
+  }
+
+  send(guildId, data) {
+    this.forGuild(guildId).forEach(l => this.cache.users.get(l).send(msg));
+  }
+
+  forGuild(guildId) {
+    return this.listeners[guildId] || (this.listeners[guildId] = []);
+  }
+
+  load() {
+    Fs.readdir(LIST_DIR, (err, files) => {
+      if (err) return this.logger.error(err);
+
+      files.forEach(f => {
+        if (f.startsWith('.')) return;
+
+        Fs.readFile(`${LIST_DIR}/${f}`, (err, data) => {
+          if (err) return this.logger.error(err);
+
+          const guildId = f.slice(0, -5);
+          this.listeners[guildId] = JSON.parse(data);
+        });
       });
     });
-  });
+  }
+
+  save(guildId) {
+    const guildLists = this.forGuild(guildId),
+          data = JSON.stringify(guildLists);
+
+    Fs.writeFile(`${LIST_DIR}/${guildId}.json`, data, err => { if (err) this.logger.error(err); });
+  }
 }
 
-function writeListeners(guildId) {
-  const guildLists = listenersForGuild(guildId),
-        data = JSON.stringify(guildLists);
+class Astro {
+  constructor() {
+    this.logger = Winston.createLogger({
+      transports: [
+        new Winston.transports.Console({ colorize: true }),
+        new Winston.transports.File({ filename: LOG_FILE })
+      ],
+      format: Winston.format.combine(
+        Winston.format.timestamp(),
+        Winston.format.simple()
+      )
+    });
+    this.client = new Discord.Client();
+    this.cache = { users: this.client.users.cache, channels: this.client.channels.cache };
+    this.listeners = new Listeners(this.logger, this.cache);
+    this.fetcher = new Fetcher(this.logger, this.cache, this.listeners);
+    this.scheduler = new Scheduler(this.logger, this.fetcher);
 
-  Fs.writeFile(`${LIST_DIR}/${guildId}.json`, data, err => { if (err) logger.error(err); });
+    this.client.once('ready', this.onReady);
+    this.client.on('message', this.onMessage);
+  }
+
+  login(token) {
+    this.client.login(token);
+  }
+
+  onReady() {
+    this.logger.info(`Connected as: ${this.client.user.username} (${this.client.user.id})`);
+    this.listeners.load();
+  }
+
+  onMessage(msg) {
+    const ctx = new MessageContext(msg);
+    if (!(ctx.isDm || ctx.mentioned(this.client.user.id))) return;
+
+    const matcher = /\b(help|intro|speak|fetch|unfetch|joblist|notices|shush|notifylist)\b/i,
+          [_, cmd] = ctx.content.match(matcher);
+
+    if (!cmd) return;
+    const res = this[cmd](ctx);
+    if (typeof res == 'string') return msg.channel.send(res);
+    if (res.author) msg.author.send(res.author);
+    if (res.channel) msg.channel.send(res.channel);
+  }
+
+  help(ctx) {
+    const names = Object.values(SIGNS),
+          lines = names.map(v => `    :star: ${v.toLowerCase()} - Today\'s ${v} horoscope`),
+          cmds = 'Retriever commands:\n' +
+            ':star2: help - Send me this help message\n' +
+            ':star2: intro - Introduce yourself\n' +
+            ':star2: speak - Say something\n' +
+            ':star2: fetch <what> - Fetch something:\n' +
+            '    :star: <blank> A newspaper\n' +
+            '    :star: skywatch - Today\'s Skywatch astrology report\n' +
+            '    :star: aa - Today\'s Astrology Answers card\n' +
+            lines.join('\n');
+
+    return { author: cmds, channel: `Rent you a message, ${ctx.author.toString()}` };
+  }
+
+  intro() {
+    return 'Ri! I\'m Rastro, a rastrorogical retriever. Rif you rask me for `help`, I\'ll rend you a message.';
+  }
+
+  speak() {
+    const messages = [
+        'Ruff!',
+        'Ri am the rerry rodel of a rodern ragor-reneral!',
+        'Rich ray, Reorge?',
+        'Rerro!',
+        'Ruh-roh, Raggy!',
+        'Rrrrrrrrr!',
+        'Rastrorogy rocks!',
+        'Rercury retrograde?',
+        'Run time, at rand camp, I rucked Ruto',
+        'I rav a ream...'
+      ],
+      index = Math.floor(Math.random() * messages.length);
+
+    return messages[index];
+  }
+
+  fetch(ctx) {
+    const format = `fetch\\s+${this.whatMatcher}\\s*(${this.whereMatcher}|${this.whoMatcher})?\\s*(${this.atMatcher})?`,
+          exp = new RegExp(format, 'i'),
+          matches = ctx.content.match(exp);
+    if (!matches) return ':newspaper2:';
+
+    const what = matches[1],
+          where = Communicator.byId(matches[3], false) || ctx.channel,
+          author = matches[4] === 'me' ? ctx.author : null,
+          who = Communicator.byId(matches[5], true),
+          recipient = who || author || where,
+          target = new MessageTarget({ guildId: ctx.guildId, what, recipient });
+    if (target.error) return this.rorry(ctx, target.error);
+
+    const hours = matches[7],
+          minutes = matches[9],
+          pm = matches[10],
+          tz = matches[11];
+    if (hours) {
+      const when = new FetchTime({ hours, minutes, pm, tz });
+      if (when.error) return this.rorry(ctx, when.error);
+      if (!(target.id === ctx.author.id || ctx.fromAdmin)) return this.notArrowed(ctx);
+      this.scheduler.scheduleJob(target, when);
+      this.logger.info(`${ctx.author.name} scheduled ${target.forLog()} at ${when.gmt}`);
+      return this.rokay(ctx, `fetching ${target.inWords()} every day at ${when.gmt} GMT`);
+    }
+
+    this.fetcher.dispatch(target);
+    if (target.isUser) {
+      const same = ctx.author.id === target.id;
+      return this.rokay(ctx, `rent ${target.what} to ${same ? 'you' : target.recipient.mention}`);
+    }
+  }
+
+  unfetch(ctx) {
+    const format = `unfetch\\s+${this.whatMatcher}\\s*(${this.whereMatcher}|${this.whoMatcher})?`,
+          exp = new RegExp(format, 'i'),
+          matches = ctx.content.match(exp);
+    if (!matches) return ':face_vomiting:';
+
+    const what = matches[1],
+          where = Communicator.byId(matches[3], false) || ctx.channel,
+          author = matches[4] === 'me' ? ctx.author : null,
+          who = Communicator.byId(matches[5], true),
+          recipient = who || author || where,
+          target = new MessageTarget({ guildId: ctx.guildId, what, recipient });
+    if (!(target.id === ctx.author.id || ctx.fromAdmin)) return this.notArrowed(ctx);
+
+    if (!cancelJob(target)) return this.rorry(ctx, `not fetching ${target.inWords()}`);
+    this.logger.info(`${ctx.author.name} unscheduled ${target.forLog()}`);
+    return this.rokay(ctx, `ro more fetching ${target.inWords()}`);
+  }
+
+  joblist(ctx) {
+    if (!ctx.fromAdmin) return this.notArrowed(ctx);
+    const list = this.scheduler.listJobs(ctx.guildId);
+    return `Job rist:\n${list ? list : '_no jobs_'}`;
+  }
+
+  notices(ctx) {
+    if (!ctx.fromAdmin) return this.notArrowed(ctx);
+    if (this.listeners.add(ctx.guildId, ctx.author.id)) return this.rokay(ctx, `I'll rend you notices`);
+    return `You ralready get notices, ${ctx.author.mention}`;
+  }
+
+  shush(ctx) {
+    if (this.listeners.remove(ctx.guildId, msg.author.id)) return this.rokay(ctx, `ro more notices`);
+    return `I don't rend you notices, ${ctx.author.mention}`;
+  }
+
+  notifylist(ctx) {
+    if (!ctx.fromAdmin) return this.notArrowed(ctx);
+    const list = this.listners.list(ctx.guildId);
+    return `Notify list:\n${list ? list : 'no notifiers'}`;
+  }
+
+  rokay(ctx, info) {
+    return `Rokay, ${ctx.author.mention} - ${info}`;
+  }
+
+  rorry(ctx, info) {
+    return `Rorry, ${ctx.author.mention} - ${info}`;
+  }
+
+  notArrowed(ctx) {
+    return this.rorry(ctx, `not arrowed`);
+  }
+
+  get whatMatcher() {
+    return `(sky\\w*|aa|${Object.keys(SIGNS).join('\\w*|')}\\w*)`;
+  }
+
+  get whereMatcher() {
+    return 'in\\s+<#(\\d+)>';
+  }
+
+  get whoMatcher() {
+    return 'for\\s+(me|<@!?(\\d+)>)';
+  }
+
+  get atMatcher() {
+    return 'at\\s+(\\d{1,2})(:(\\d{2}))?([ap]m)?\\s*([A-Z]{1,3})?';
+  }
 }
 
-client.once('ready', onReady);
-client.on('message', onMessage);
-client.login(Auth.token);
+const astro = new Astro();
+astro.login(Auth.token);
