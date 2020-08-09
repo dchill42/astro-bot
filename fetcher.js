@@ -1,5 +1,6 @@
 const Https = require('https');
 const Parser = require('node-html-parser');
+const Auth = require('./auth.json');
 const { SIGNS } = require('./constants');
 
 module.exports = class Fetcher {
@@ -15,19 +16,29 @@ module.exports = class Fetcher {
   }
 
   Skywatch(target) {
+    let retried = false;
     const locale = 'en-US',
           date = new Date(),
           weekday = date.toLocaleString(locale, { weekday: 'long' }),
           month = date.toLocaleString(locale, { month: 'long' }),
           day = date.getDate(),
-          url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`;
+          url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`,
+          skywatchResult = (body, statusCode) => {
+            if (statusCode == 404 && weekday.toLowerCase() == 'saturday' && !retried) {
+              retried = true;
+              this.logger.info(`Retrying weekend ${target.what}`);
+              const weurl = `https://skywatchastrology.com/the-weekend-${month.toLowerCase()}-${day}-${day + 1}/`;
+              this.fetchData(weurl, target, skywatchResult);
+              return;
+            }
 
-    this.fetchData(url, target, (body) => {
-      const elem = Parser.parse(body).querySelector('.entry-content'),
-            entry = elem.structuredText.replace(/\n/g, '\n\n');
+            const elem = Parser.parse(body).querySelector('.entry-content'),
+                  entry = elem.structuredText.replace(/\n/g, '\n\n');
 
-      this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
-    });
+            this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
+          };
+
+    this.fetchData(url, target, skywatchResult);
   }
 
   AstrologyAnswers(target) {
@@ -67,7 +78,7 @@ module.exports = class Fetcher {
     Https.get(url, (res) => {
       let body = '';
       res.on('data', (chunk) => body += chunk);
-      res.on('end', () => { onEnd(body); });
+      res.on('end', () => { onEnd(body, res.statusCode); });
       res.on('error', (err) => { this.onError(target, err) });
     }).end();
   }
