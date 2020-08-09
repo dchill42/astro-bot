@@ -62,7 +62,8 @@ module.exports = class Fetcher {
           url = `${host}/${target.what.toLowerCase()}-daily-horoscope/`;
 
     this.fetchData(url, target, (body) => {
-      const elem = Parser.parse(body).querySelector('.horoscope_summary'),
+      const summ = Parser.parse(body).querySelector('.horoscope_summary'),
+            elem = summ.querySelector('div'),
             ul = elem.querySelector('ul');
 
       if (ul) ul.set_content('');
