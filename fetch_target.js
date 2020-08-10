@@ -40,6 +40,18 @@ module.exports = class FetchTarget {
     return `${this.what}@${this.guildId}#${this.recipient.code}${this.recipient.id}`;
   }
 
+  static fromMatches(ctx, matches) {
+    const what = matches[1],
+          where = Communicator.byId(matches[3], false, ctx.cache) || ctx.channel,
+          author = matches[4] === 'me' ? ctx.author : null,
+          who = Communicator.byId(matches[5], true, ctx.cache),
+          recipient = who || author || where,
+          target = new FetchTarget({ guildId: ctx.guildId, what, recipient }),
+          valid = (target.id === ctx.author.id || target.id == ctx.channel.id || ctx.fromAdmin);
+
+    return valid ? target : null;
+  }
+
   static fromString(jobName, cache) {
     const [_, what, guildId, code, id] = jobName.match(/^(\w+)@(\d+)#([uc])(\d+)/),
           isUser = code == 'u',

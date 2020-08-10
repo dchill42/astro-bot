@@ -42,6 +42,8 @@ class Astro {
       'help',
       'intro',
       'introduce',
+      'apologize',
+      'promise',
       'speak',
       'bang',
       'fetch',
@@ -54,6 +56,7 @@ class Astro {
     ];
     const aliases = {
       introduce: 'intro',
+      sorry: 'apologize',
       dogs: 'dog',
       canine: 'dog',
       canines: 'dog'
@@ -137,6 +140,19 @@ class Astro {
     this.logActivity(ctx, 'requested an introduction');
   }
 
+  apologize(ctx) {
+    const matches = ctx.content.match(/(sorry|apologize)\s*(to (me|@everyone|<@!?\d+>))?/i),
+          person = matches[3] === 'me' ? ctx.author.mention : matches[3],
+          sorry = 'I\'m rorry',
+          msg = person ? `${sorry}, ${person}` : sorry;
+
+    ctx.reply(msg);
+  }
+
+  promise(ctx) {
+    ctx.reply(ctx.fromAdmin ? 'Definitry' : this.rorry(ctx, 'ro promises'));
+  }
+
   speak(ctx) {
     const messages = [
         'Ruff!',
@@ -176,7 +192,7 @@ class Astro {
           matches = ctx.content.match(exp);
     if (!matches) return ctx.reply('🗞');
 
-    const target = this.getTarget(ctx, matches);
+    const target = FetchTarget.fromMatches(matches, ctx);
     if (!target) return ctx.reply(this.notArrowed(ctx));
     if (target.error) return ctx.reply(this.rorry(ctx, target.error));
 
@@ -209,7 +225,7 @@ class Astro {
           matches = ctx.content.match(exp);
     if (!matches) return ctx.reply('🤮');
 
-    const target = this.getTarget(ctx, matches);
+    const target = FetchTarget.fromMatches(matches, ctx);
     if (!target) return ctx.reply(this.notArrowed(ctx));
     if (target.error) return ctx.reply(this.rorry(ctx, target.error));
 
@@ -255,17 +271,6 @@ class Astro {
       .catch(err => this.logger.error(err));
 
     this.logActivity(ctx, `requested ${count} log lines`);
-  }
-
-  getTarget(ctx, matches) {
-    const what = matches[1],
-          where = Communicator.byId(matches[3], false, ctx.cache) || ctx.channel,
-          author = matches[4] === 'me' ? ctx.author : null,
-          who = Communicator.byId(matches[5], true, ctx.cache),
-          recipient = who || author || where,
-          target = new FetchTarget({ guildId: ctx.guildId, what, recipient });
-
-    return (target.id === ctx.author.id || ctx.fromAdmin) ? target : null;
   }
 
   logActivity(ctx, didWhat) {
