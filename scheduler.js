@@ -72,7 +72,7 @@ module.exports = class Scheduler {
             const when = new FetchTime({ ms });
 
             guildJobs[jobName] = { time: ms }
-            guildJobs[jobName].schedule = Cron.scheduleJob(when.cron, () => { runJob(jobName); });
+            guildJobs[jobName].schedule = Cron.scheduleJob(when.cron, () => { this.runJob(jobName); });
           });
         });
       });
