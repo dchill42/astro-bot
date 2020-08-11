@@ -16,19 +16,29 @@ module.exports = class Fetcher {
   }
 
   Skywatch(target) {
-    let retried = false;
     const locale = 'en-US',
           date = new Date(),
           weekday = date.toLocaleString(locale, { weekday: 'long' }),
           month = date.toLocaleString(locale, { month: 'long' }),
-          day = date.getDate(),
-          url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}-2/`,
+          day = date.getDate();
+    let mod = date.getFullYear(), retried = false;
+    const base_url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}`,
           skywatchResult = (body, statusCode) => {
-            if (statusCode == 404 && weekday.toLowerCase() == 'saturday' && !retried) {
-              retried = true;
-              this.logger.info(`Retrying weekend ${target.what}`);
-              const weurl = `https://skywatchastrology.com/the-weekend-${month.toLowerCase()}-${day}-${day + 1}/`;
-              this.fetchData(weurl, target, skywatchResult);
+            if (statusCode == 404) {
+              if (weekday.toLowerCase() == 'saturday') {
+                if (retried) return;
+                retried = true;
+
+                this.fetchData(`${base_url}-${day + 1}/`, target, skywatchResult);
+                return;
+              }
+
+              if (mod > 3) mod = 3;
+              else --mod;
+              if (mod === 0) return;
+              const tail = mod > 1 ? `-${mod}` : '';
+
+              this.fetchData(`${base_url}${tail}/`, target, skywatchResult);
               return;
             }
 
@@ -38,7 +48,7 @@ module.exports = class Fetcher {
             this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
           };
 
-    this.fetchData(url, target, skywatchResult);
+    this.fetchData(`${base_url}-${mod}/`, target, skywatchResult);
   }
 
   AstrologyAnswers(target) {
@@ -70,12 +80,12 @@ module.exports = class Fetcher {
 
       const entry = elem.structuredText.replace(/\n/g, '\n\n');
 
-      this.send(target, `${entry}\n\n${host}`);
+      this.send(target, `**${target.what}:**\n\n${entry}\n\n${host}`);
     });
   }
 
   fetchData(url, target, onEnd) {
-    this.logger.info(`Fetching ${target.what}`);
+    this.logger.info(`Fetching ${target.what} from ${url}`);
     Https.get(url, (res) => {
       let body = '';
       res.on('data', (chunk) => body += chunk);

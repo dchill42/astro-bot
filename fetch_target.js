@@ -40,7 +40,7 @@ module.exports = class FetchTarget {
     return `${this.what}@${this.guildId}#${this.recipient.code}${this.recipient.id}`;
   }
 
-  static fromMatches(ctx, matches) {
+  static fromMatches(matches, ctx) {
     const what = matches[1],
           where = Communicator.byId(matches[3], false, ctx.cache) || ctx.channel,
           author = matches[4] === 'me' ? ctx.author : null,
