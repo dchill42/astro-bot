@@ -40,7 +40,7 @@ module.exports = class Scheduler {
   runJob(jobName) {
     const target = FetchTarget.fromString(jobName, this.cache);
 
-    this.logger.info(`Running ${target.forLog()}`);
+    this.logger.info(`Running ${target.what} job`);
     this.fetcher.dispatch(target);
   }
 

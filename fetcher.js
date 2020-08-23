@@ -21,24 +21,24 @@ module.exports = class Fetcher {
           weekday = date.toLocaleString(locale, { weekday: 'long' }),
           month = date.toLocaleString(locale, { month: 'long' }),
           day = date.getDate();
-    let mod = date.getFullYear(), retried = false;
-    const base_url = `https://skywatchastrology.com/${weekday.toLowerCase()}-${month.toLowerCase()}-${day}`,
+    let mod = date.getFullYear(), weekend = false;
+    const base_url = `https://skywatchastrology.com`,
+          date_uri = `${weekday.toLowerCase()}-${month.toLowerCase()}-${day}`,
           skywatchResult = (body, statusCode) => {
             if (statusCode == 404) {
-              if (weekday.toLowerCase() == 'saturday') {
-                if (retried) return;
-                retried = true;
-
-                this.fetchData(`${base_url}-${day + 1}/`, target, skywatchResult);
-                return;
-              }
-
               if (mod > 3) mod = 3;
               else --mod;
-              if (mod === 0) return;
+              if (mod === 0) {
+                if (!weekend && ['saturday', 'sunday'].includes(weekday.toLowerCase())) {
+                  const we_uri = `the-weekend-${month.toLowerCase()}-${day}-${day + 1}`;
+                  weekend = true;
+                  this.fetchData(`${base_url}/${we_uri}`, target, skywatchResult);
+                } else this.onError(target, 'Couldn\'t find it');
+                return;
+              }
               const tail = mod > 1 ? `-${mod}` : '';
 
-              this.fetchData(`${base_url}${tail}/`, target, skywatchResult);
+              this.fetchData(`${base_url}/${date_uri}${tail}/`, target, skywatchResult);
               return;
             }
 
@@ -48,7 +48,7 @@ module.exports = class Fetcher {
             this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
           };
 
-    this.fetchData(`${base_url}-${mod}/`, target, skywatchResult);
+    this.fetchData(`${base_url}/${date_uri}-${mod}/`, target, skywatchResult);
   }
 
   AstrologyAnswers(target) {
@@ -60,7 +60,8 @@ module.exports = class Fetcher {
             headers: { Authorization: `Bearer ${Auth.twitter}` }
           };
 
-    this.fetchData(opts, target, (body) => {
+    this.fetchData(opts, target, (body, statusCode) => {
+      if (statusCode == 404) return this.onError(target, '404');
       const payload = JSON.parse(body);
 
       this.send(target, payload.statuses[0].entities.media[0].media_url);
@@ -71,7 +72,8 @@ module.exports = class Fetcher {
     const host = 'https://astrologyanswers.com/horoscopes',
           url = `${host}/${target.what.toLowerCase()}-daily-horoscope/`;
 
-    this.fetchData(url, target, (body) => {
+    this.fetchData(url, target, (body, statusCode) => {
+      if (statusCode == 404) return this.onError(target, '404');
       const summ = Parser.parse(body).querySelector('.horoscope_summary'),
             elem = summ.querySelector('div'),
             ul = elem.querySelector('ul');
@@ -85,7 +87,8 @@ module.exports = class Fetcher {
   }
 
   fetchData(url, target, onEnd) {
-    this.logger.info(`Fetching ${target.what} from ${url}`);
+    const source = url.hostname ? `http://${url.hostname}${url.path}` : url;
+    this.logger.info(`Fetching ${target.what} from ${source}`);
     Https.get(url, (res) => {
       let body = '';
       res.on('data', (chunk) => body += chunk);
