@@ -16,39 +16,20 @@ module.exports = class Fetcher {
   }
 
   Skywatch(target) {
-    const locale = 'en-US',
+    const url = 'https://skywatchastrology.com/',
+          locale = 'en-US',
           date = new Date(),
           weekday = date.toLocaleString(locale, { weekday: 'long' }),
           month = date.toLocaleString(locale, { month: 'long' }),
           day = date.getDate();
-    let mod = date.getFullYear(), weekend = false;
-    const base_url = `https://skywatchastrology.com`,
-          date_uri = `${weekday.toLowerCase()}-${month.toLowerCase()}-${day}`,
-          skywatchResult = (body, statusCode) => {
-            if (statusCode == 404) {
-              if (mod > 3) mod = 3;
-              else --mod;
-              if (mod === 0) {
-                if (!weekend && ['saturday', 'sunday'].includes(weekday.toLowerCase())) {
-                  const we_uri = `the-weekend-${month.toLowerCase()}-${day}-${day + 1}`;
-                  weekend = true;
-                  this.fetchData(`${base_url}/${we_uri}`, target, skywatchResult);
-                } else this.onError(target, 'Couldn\'t find it');
-                return;
-              }
-              const tail = mod > 1 ? `-${mod}` : '';
 
-              this.fetchData(`${base_url}/${date_uri}${tail}/`, target, skywatchResult);
-              return;
-            }
+    this.fetchData(url, target, (body, statusCode) => {
+      if (statusCode == 404) return this.onError(target, '404');
+      const elem = Parser.parse(body).querySelector('#primary #content article .entry-content'),
+            entry = elem.structuredText.replace(/&nbsp;/g, ' ').replace(/\n/g, '\n\n');
 
-            const elem = Parser.parse(body).querySelector('.entry-content'),
-                  entry = elem.structuredText.replace(/\n/g, '\n\n');
-
-            this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
-          };
-
-    this.fetchData(`${base_url}/${date_uri}-${mod}/`, target, skywatchResult);
+      this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
+    });
   }
 
   AstrologyAnswers(target) {
