@@ -26,7 +26,26 @@ module.exports = class Fetcher {
     this.fetchData(url, target, (body, statusCode) => {
       if (statusCode == 404) return this.onError(target, '404');
       const elem = Parser.parse(body).querySelector('#primary #content article .entry-content'),
-            entry = elem.structuredText.replace(/&nbsp;/g, ' ').replace(/\n/g, '\n\n');
+            text = elem.structuredText.replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').replace(/\n/g, '\n\n'),
+            matches = text.match(/\d{1,2}:\d\d\s*([aApP][mM])?\s*(P[SD]T)?/g),
+            timereg = /(\d{1,2}):(\d\d)\s*([aApP][mM])?(\s*)(P[SD]T)?/;
+      let entry = text;
+
+      matches.forEach(m => {
+        const parts = m.match(timereg),
+              minutes = parts[2],
+              space = parts[4] ? parts[4] : '',
+              zone = parts[5] ? parts[5].replace('P', 'E') : '';
+        let hour = parseInt(parts[1]) + 3,
+            ampm = parts[3] ? parts[3].toLowerCase() : 'am';
+
+        if (hour > 12) {
+          hour -= 12;
+          ampm = ampm == 'am' ? 'pm' : 'am';
+        }
+
+        entry = entry.replace(m, `${hour}:${minutes} ${ampm}${space}${zone}`);
+      });
 
       this.send(target, `**${weekday}, ${month} ${day}**\n\n${entry}\n\nhttps://skywatchastrology.com`);
     });
