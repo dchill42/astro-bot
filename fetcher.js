@@ -36,13 +36,15 @@ module.exports = class Fetcher {
               minutes = parts[2],
               space = parts[4] ? parts[4] : '',
               zone = parts[5] ? parts[5].replace('P', 'E') : '';
-        let hour = parseInt(parts[1]) + 3,
-            ampm = parts[3] ? parts[3].toLowerCase() : 'am';
+        let hour = parseInt(parts[1]),
+            ampm = parts[3] ? parts[3].toLowerCase() : 'am',
+            flip = false;
 
-        if (hour > 12) {
-          hour -= 12;
-          ampm = ampm == 'am' ? 'pm' : 'am';
-        }
+        if (hour == 12) hour = 0;
+        hour += 3;
+        if (hour >= 12) flip = true;
+        if (hour > 12) hour -= 12;
+        if (flip) ampm = ampm == 'am' ? 'pm' : 'am';
 
         entry = entry.replace(m, `${hour}:${minutes} ${ampm}${space}${zone}`);
       });
